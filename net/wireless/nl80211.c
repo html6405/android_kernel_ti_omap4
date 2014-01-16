@@ -190,6 +190,22 @@ static const struct nla_policy nl80211_policy[NL80211_ATTR_MAX+1] = {
 	[NL80211_ATTR_TDLS_OPERATION] = { .type = NLA_U8 },
 	[NL80211_ATTR_TDLS_SUPPORT] = { .type = NLA_FLAG },
 	[NL80211_ATTR_TDLS_EXTERNAL_SETUP] = { .type = NLA_FLAG },
+	[NL80211_ATTR_DONT_WAIT_FOR_ACK] = { .type = NLA_FLAG },
+	[NL80211_ATTR_PROBE_RESP] = { .type = NLA_BINARY,
+				      .len = IEEE80211_MAX_DATA_LEN },
+	[NL80211_ATTR_DFS_REGION] = { .type = NLA_U8 },
+	[NL80211_ATTR_DISABLE_HT] = { .type = NLA_FLAG },
+	[NL80211_ATTR_HT_CAPABILITY_MASK] = {
+		.len = NL80211_HT_CAPABILITY_LEN
+	},
+	[NL80211_ATTR_NOACK_MAP] = { .type = NLA_U16 },
+	[NL80211_ATTR_INACTIVITY_TIMEOUT] = { .type = NLA_U16 },
+	[NL80211_ATTR_BG_SCAN_PERIOD] = { .type = NLA_U16 },
+	[NL80211_ATTR_HANDLE_DFS] = { .type = NLA_FLAG },
+	[NL80211_ATTR_OPMODE_NOTIF] = { .type = NLA_U8 },
+	[NL80211_ATTR_VENDOR_ID] = { .type = NLA_U32 },
+	[NL80211_ATTR_VENDOR_SUBCMD] = { .type = NLA_U32 },
+	[NL80211_ATTR_VENDOR_DATA] = { .type = NLA_BINARY },
 };
 
 /* policy for the key attributes */
@@ -1010,6 +1026,22 @@ static int nl80211_send_wiphy(struct sk_buff *msg, u32 pid, u32 seq, int flags,
 	if (dev->wiphy.flags & WIPHY_FLAG_HAVE_AP_SME)
 		NLA_PUT_U32(msg, NL80211_ATTR_DEVICE_AP_SME,
 			    dev->wiphy.ap_sme_capa);
+
+	if (dev->wiphy.n_vendor_commands) {
+		const struct nl80211_vendor_cmd_info *info;
+		struct nlattr *nested;
+
+		nested = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+		if (!nested)
+			goto nla_put_failure;
+
+		for (i = 0; i < dev->wiphy.n_vendor_commands; i++) {
+			info = &dev->wiphy.vendor_commands[i].info;
+			if (nla_put(msg, i + 1, sizeof(*info), info))
+				goto nla_put_failure;
+			}
+			nla_nest_end(msg, nested);
+	}
 
 	return genlmsg_end(msg, hdr);
 
@@ -4478,6 +4510,41 @@ static int nl80211_leave_ibss(struct sk_buff *skb, struct genl_info *info)
 	return cfg80211_leave_ibss(rdev, dev, false);
 }
 
+static struct sk_buff *
+__cfg80211_alloc_vendor_skb(struct cfg80211_registered_device *rdev,
+			    int approxlen, u32 portid, u32 seq,
+			    enum nl80211_commands cmd,
+			    enum nl80211_attrs attr, gfp_t gfp)
+{
+	struct sk_buff *skb;
+	void *hdr;
+	struct nlattr *data;
+
+	skb = nlmsg_new(approxlen + 100, gfp);
+	if (!skb)
+		return NULL;
+
+	hdr = nl80211hdr_put(skb, portid, seq, 0, cmd);
+	if (!hdr) {
+		kfree_skb(skb);
+		return NULL;
+	}
+
+	if (nla_put_u32(skb, NL80211_ATTR_WIPHY, rdev->wiphy_idx))
+		goto nla_put_failure;
+	data = nla_nest_start(skb, attr);
+
+	((void **)skb->cb)[0] = rdev;
+	((void **)skb->cb)[1] = hdr;
+	((void **)skb->cb)[2] = data;
+
+	return skb;
+
+ nla_put_failure:
+	kfree_skb(skb);
+	return NULL;
+}
+
 #ifdef CONFIG_NL80211_TESTMODE
 static struct genl_multicast_group nl80211_testmode_mcgrp = {
 	.name = "testmode",
@@ -4493,11 +4560,11 @@ static int nl80211_testmode_do(struct sk_buff *skb, struct genl_info *info)
 
 	err = -EOPNOTSUPP;
 	if (rdev->ops->testmode_cmd) {
-		rdev->testmode_info = info;
+		rdev->cur_cmd_info = info;
 		err = rdev->ops->testmode_cmd(&rdev->wiphy,
 				nla_data(info->attrs[NL80211_ATTR_TESTDATA]),
 				nla_len(info->attrs[NL80211_ATTR_TESTDATA]));
-		rdev->testmode_info = NULL;
+		rdev->cur_cmd_info = NULL;
 	}
 
 	return err;
@@ -5673,6 +5740,71 @@ static int nl80211_register_beacons(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
+static int nl80211_vendor_cmd(struct sk_buff *skb, struct genl_info *info)
+{
+	struct cfg80211_registered_device *rdev = info->user_ptr[0];
+	struct net_device *dev = info->user_ptr[1];
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	int i, err;
+	u32 vid, subcmd;
+
+	if (!rdev->wiphy.vendor_commands)
+		return -EOPNOTSUPP;
+
+	if (IS_ERR(wdev)) {
+		err = PTR_ERR(wdev);
+		if (err != -EINVAL)
+			return err;
+		wdev = NULL;
+	} else if (wdev->wiphy != &rdev->wiphy) {
+		return -EINVAL;
+	}
+
+	if (!info->attrs[NL80211_ATTR_VENDOR_ID] ||
+	    !info->attrs[NL80211_ATTR_VENDOR_SUBCMD])
+		return -EINVAL;
+
+	vid = nla_get_u32(info->attrs[NL80211_ATTR_VENDOR_ID]);
+	subcmd = nla_get_u32(info->attrs[NL80211_ATTR_VENDOR_SUBCMD]);
+	for (i = 0; i < rdev->wiphy.n_vendor_commands; i++) {
+		const struct wiphy_vendor_command *vcmd;
+		void *data = NULL;
+		int len = 0;
+
+		vcmd = &rdev->wiphy.vendor_commands[i];
+
+		if (vcmd->info.vendor_id != vid || vcmd->info.subcmd != subcmd)
+			continue;
+
+		if (vcmd->flags & (WIPHY_VENDOR_CMD_NEED_WDEV |
+				   WIPHY_VENDOR_CMD_NEED_NETDEV)) {
+			if (!wdev)
+				return -EINVAL;
+			if (vcmd->flags & WIPHY_VENDOR_CMD_NEED_NETDEV &&
+			    !wdev->netdev)
+				return -EINVAL;
+
+			if (vcmd->flags & WIPHY_VENDOR_CMD_NEED_RUNNING) {
+				if (wdev->netdev &&
+				    !netif_running(wdev->netdev))
+					return -ENETDOWN;
+			}
+		} else {
+			wdev = NULL;
+		}
+
+		if (info->attrs[NL80211_ATTR_VENDOR_DATA]) {
+			data = nla_data(info->attrs[NL80211_ATTR_VENDOR_DATA]);
+			len = nla_len(info->attrs[NL80211_ATTR_VENDOR_DATA]);
+		}
+
+		return rdev->wiphy.vendor_commands[i].doit(&rdev->wiphy, wdev,
+							   data, len);
+	}
+
+	return -EOPNOTSUPP;
+}
+
 #define NL80211_FLAG_NEED_WIPHY		0x01
 #define NL80211_FLAG_NEED_NETDEV	0x02
 #define NL80211_FLAG_NEED_RTNL		0x04
@@ -6246,6 +6378,14 @@ static struct genl_ops nl80211_ops[] = {
 	{
 		.cmd = NL80211_CMD_REGISTER_BEACONS,
 		.doit = nl80211_register_beacons,
+		.policy = nl80211_policy,
+		.flags = GENL_ADMIN_PERM,
+		.internal_flags = NL80211_FLAG_NEED_WIPHY |
+				  NL80211_FLAG_NEED_RTNL,
+	},
+	{
+		.cmd = NL80211_CMD_VENDOR,
+		.doit = nl80211_vendor_cmd,
 		.policy = nl80211_policy,
 		.flags = GENL_ADMIN_PERM,
 		.internal_flags = NL80211_FLAG_NEED_WIPHY |
