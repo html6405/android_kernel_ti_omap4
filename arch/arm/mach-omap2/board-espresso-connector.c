@@ -79,7 +79,7 @@ static char *device_names[] = {
 	[P30_EARJACK_WITH_DOCK]		= "earjack",
 	[P30_CARDOCK]			= "car-dock",
 	[P30_ANAL_TV_OUT]		= "TV-Outline",
-	[P30_KEYBOARDDOCK]		= "keboard-dock",
+	[P30_KEYBOARDDOCK]		= "keyboard-dock",
 	[P30_DESKDOCK]			= "desk-dock",
 	[P30_JIG]			= "jig",
 	[P30_USB]			= "USB",
@@ -115,7 +115,7 @@ enum {
 	UEVENT_DOCK_NONE = 0,
 	UEVENT_DOCK_DESK,
 	UEVENT_DOCK_CAR,
-	UEVENT_DOCK_KEYBOARD = 9,
+	UEVENT_DOCK_KEYBOARD = 3,
 };
 
 enum {
@@ -549,6 +549,7 @@ static void espresso_30pin_detected(int device, bool connected)
 	case P30_KEYBOARDDOCK:
 		if (connected) {
 			espresso_set_dock_switch(UEVENT_DOCK_KEYBOARD);
+			pr_info("the dock proves to be a keyboard dock\n");
 #ifdef CONFIG_SND_OMAP_SOC_ESPRESSO
 			notify_dock_status(1);
 #endif
@@ -562,6 +563,7 @@ static void espresso_30pin_detected(int device, bool connected)
 	case P30_DESKDOCK:
 		if (connected) {
 			espresso_deskdock_attached();
+			pr_info("the dock proves to be a desktop dock\n");
 #ifdef CONFIG_SND_OMAP_SOC_ESPRESSO
 			notify_dock_status(1);
 #endif
@@ -1177,10 +1179,10 @@ switch_dev_fail:
 
 	platform_device_register(&espresso_device_connector);
 
-	espresso_otg->dock_switch.name = "dock";
+	espresso_otg->dock_switch.name = "dock_station";
 	switch_dev_register(&espresso_otg->dock_switch);
 
-	espresso_otg->audio_switch.name = "dock_audio";
+	espresso_otg->audio_switch.name = "usb_audio";
 	switch_dev_register(&espresso_otg->audio_switch);
 
 	espresso_otg->current_device = 0;
