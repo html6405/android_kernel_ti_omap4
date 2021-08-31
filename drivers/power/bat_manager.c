@@ -25,7 +25,7 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
-#include <linux/android_alarm.h>
+#include <linux/alarmtimer.h>
 #include <linux/proc_fs.h>
 #include <linux/usb/otg.h>
 #include <linux/notifier.h>
@@ -304,11 +304,9 @@ static int batman_charging_status_check(struct charger_device_info *di)
 {
 	int ret = 0;
 
-	ktime_t ktime;
 	struct timespec cur_time;
 
-	ktime = alarm_get_elapsed_realtime();
-	cur_time = ktime_to_timespec(ktime);
+	get_monotonic_boottime(&cur_time);
 
 	switch (di->discharge_status) {
 	case STATUS_BATT_CHARGABLE:
@@ -460,7 +458,7 @@ static void batman_program_alarm(struct charger_device_info *di, int seconds)
 	ktime_t next;
 
 	next = ktime_add(di->last_poll, low_interval);
-	alarm_start_range(&di->alarm, next, ktime_add(next, slack));
+	alarm_start(&di->alarm, next);
 }
 
 static void battery_manager_work(struct work_struct *work)
@@ -504,7 +502,7 @@ static void battery_manager_work(struct work_struct *work)
 		di->bat_info.health, di->bat_info.temp,
 		di->discharge_status, di->chg_limit_time, di->pdata->bootmode);
 
-	di->last_poll = alarm_get_elapsed_realtime();
+	get_monotonic_boottime(&di->last_poll);
 	ts = ktime_to_timespec(di->last_poll);
 
 	local_irq_save(flags);
@@ -790,7 +788,7 @@ static int __devinit batman_probe(struct platform_device *pdev)
 	if (ret)
 		pr_err("%s : Failed to create_attrs\n", __func__);
 
-	alarm_init(&di->alarm, ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP,
+	alarm_init(&di->alarm, ALARM_BOOTTIME,
 			batman_battery_alarm);
 
 	di->callbacks.set_full_charge = set_full_charge;
